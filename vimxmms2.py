@@ -5,8 +5,8 @@
 File: vimxmms2.py
 Author: Wang Xin
 Email: <wxyzin gmail com>
-Version: 0.1
-Date: 2008-08-31
+Version: 0.2
+Date: 2008-09-01
 Require:
     vim with +python support.
     xmms2.
@@ -42,6 +42,12 @@ Customize:
 Tips:
     When adding music file or directory, you can use Ctrl-D to show all 
     candidates. Also, you can use arrow keys to navigate the historys.
+Changelog:
+    2008/08/31
+        - Change from XMMSSync to XMMS to gain more control.
+        - Fix a bug when play the last song in the playlist, remove any
+          entry will cause an out of range error.
+        - When encouter encoding error of id3, use file name instead.
 '''
 
 import os.path
@@ -51,54 +57,59 @@ import xmmsclient
 import urllib
 
 class Controller(object):
-    """A simple wrapper class of XMMSSync."""
+    """A simple wrapper class of xmmsclient.XMMS."""
 
     def __init__(self, options):
-        self.c = xmmsclient.XMMSSync('VIM')
+        self.x = xmmsclient.XMMS('VIM')
         try:
-            self.c.connect()
+            self.x.connect()
         except IOError:
             os.system('xmms2-launcher')
-            self.c.connect()
+            self.x.connect()
 
         self.options = options
 
     def is_playing(self):
-        return self.c.playback_status() == xmmsclient.PLAYBACK_STATUS_PLAY
+        r = self.x.playback_status()
+        r.wait()
+        return r.get_uint() == xmmsclient.PLAYBACK_STATUS_PLAY
 
     def play(self, pos):
         if self.current_position() != pos:
-            self.c.playlist_set_next(pos)
-            self.c.playback_tickle()
+            self.x.playlist_set_next(pos).wait()
+            self.x.playback_tickle().wait()
         if not self.is_playing():
-            self.c.playback_start()
+            self.x.playback_start().wait()
 
     def delete(self, pos):
         """Remove a song from playlist.
 
         If the song to be removed is playing now, we first stop it.
         """
-        if self.is_playing():
-            if self.current_position() == pos:
-                self.c.playback_stop()
-        self.c.playlist_remove_entry(pos)
+        if self.is_playing() and self.current_position() == pos:
+                self.x.playback_stop().wait()
+        self.x.playlist_remove_entry(pos).wait()
 
     def clear(self):
-        self.c.playback_stop()
-        self.c.playlist_clear()
+        self.x.playback_stop().wait()
+        self.x.playlist_clear().wait()
 
     def pause(self):
-        if self.c.playback_status() == xmmsclient.PLAYBACK_STATUS_PAUSE:
-            self.c.playback_start()
+        r = self.x.playback_status()
+        r.wait()
+        if r.get_uint() == xmmsclient.PLAYBACK_STATUS_PAUSE:
+            self.x.playback_start().wait()
         else:
-            self.c.playback_pause()
+            self.x.playback_pause().wait()
 
     def change_volume(self, num):
         def set(percent):
-            self.c.playback_volume_set('left', percent)
-            self.c.playback_volume_set('right', percent)
+            self.x.playback_volume_set('left', percent).wait()
+            self.x.playback_volume_set('right', percent).wait()
 
-        vol = self.c.playback_volume_get()
+        r = self.x.playback_volume_get()
+        r.wait()
+        vol = r.get_dict()
         left = vol['left'] + num
         right = vol['right'] + num
 
@@ -112,30 +123,33 @@ class Controller(object):
             print 'ERROR: volume out of range'
 
     def stop(self):
-        self.c.playback_stop()
+        self.x.playback_stop().wait()
 
     def save(self, name):
-        self.c.medialib_playlist_save_current(name)
+        self.x.medialib_playlist_save_current(name).wait()
 
     def load(self, name):
-        self.c.playlist_load(name)
+        self.x.playlist_load(name).wait()
 
     def add(self, path):
         url = 'file://' + path
         if os.path.isfile(path):
-            self.c.playlist_add_url(url)
+            self.x.playlist_add_url(url).wait()
         else:
-            self.c.playlist_radd(url)
+            self.x.playlist_radd(url).wait()
 
     def current_position(self):
         """Return current position in the playlist."""
 
         # It is an error to call playlist_current_pos when there are
         # no entries in the playlist.
-        try:
-            return self.c.playlist_current_pos()['position']
-        except xmmsclient.XMMSError:
+        r = self.x.playlist_current_pos()
+        r.wait()
+        if r.iserror():
+            print r.get_error()
             return None
+        else:
+            return r.get_dict()['position']
 
     def playlist(self):
         """Format the playlist.
@@ -145,14 +159,25 @@ class Controller(object):
         """
         def iconv(s):
             encoding = self.options["id3_encoding"]
-            if encoding:
-                return s.encode('latin1').decode(encoding).encode('utf-8')
-            else:
-                return s.encode('latin1')
+            try:
+                if encoding:
+                    return s.encode('latin1').decode(encoding).encode('utf-8')
+                else:
+                    return s.encode('latin1')
+            except UnicodeEncodeError:
+                return ""
 
         lst = []
-        for id in self.c.playlist_list_entries():
-            song = self.c.medialib_get_info(id)
+        r = self.x.playlist_list_entries()
+        r.wait()
+        for id in r.get_list():
+            r = self.x.medialib_get_info(id)
+            r.wait()
+            if r.iserror():
+                print r.get_error()
+                lst.append(' ')
+                continue
+            song = r.get_propdict()
             try:
                 artist = iconv(song[('plugin/id3v2', 'artist')])
             except KeyError:
@@ -270,7 +295,7 @@ class XMMS2Vim(object):
         """Refresh the current playing music indicator."""
         current = self.player.current_position()
         if current != None:
-            if self.prev_song != None:
+            if self.prev_song != None and self.prev_song < len(self.buf):
                 self.buf[self.prev_song] = ' ' + self.buf[self.prev_song][1:]
             self.buf[current] = '-' + self.buf[current][1:]
             self.prev_song = current
