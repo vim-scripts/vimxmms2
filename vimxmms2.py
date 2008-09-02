@@ -3,10 +3,13 @@
 '''A XMMS2 client for Vim.
 
 File: vimxmms2.py
-Author: Wang Xin
+Author: Xin Wang
 Email: <wxyzin gmail com>
-Version: 0.3
-Date: 2008-09-01
+Version: 0.4
+Date: 2008-09-02
+
+This plugin is provided under BSD-ish license.
+
 Require:
     vim with +python support.
     xmms2.
@@ -45,10 +48,18 @@ Customize:
 
     Specify the play window's width:
         let g:xmms_window_width=30
+
+    Specify the playlist format, default is "%artist - %title", %album
+    is also avaiable.
+        let g:xmms_playlist_format="%title"
+
 Tips:
     When adding music file or directory, you can use Ctrl-D to show all 
     candidates. Also, you can use arrow keys to navigate the historys.
 Changelog:
+    2008/09/02
+        - Auto refresh play window using CursorHold event.
+        - Now user can customize the playlist format.
     2008/09/01
         - Add basic playlist save and load support.
         - Show current playlist and volume in statusline.
@@ -242,6 +253,13 @@ class Controller(object):
                     title = iconv(song[('plugin/mad', 'title')])
                 except KeyError:
                     title = ''
+            try:
+                album = iconv(song[('plugin/id3v2', 'album')])
+            except KeyError:
+                try:
+                    album = iconv(song[('plugin/mad', 'album')])
+                except KeyError:
+                    album = ''
             if artist == "" and title == "":
                 name = os.path.split(song[('server', 'url')])[1]
                 name = os.path.splitext(name)[0]
@@ -250,7 +268,11 @@ class Controller(object):
                 name = name.replace("+", " ")
                 lst.append('  ' + name)
             else:
-                lst.append('  %s - %s' % (artist.ljust(6), title))
+                line = self.options["playlist_format"]
+                line = line.replace("%title", title)
+                line = line.replace("%artist", artist)
+                line = line.replace("%album", album)
+                lst.append('  ' + line)
 
         return lst
 
@@ -291,6 +313,26 @@ class XMMS2Vim(object):
         self.options = self._read_options()
         self.player = Controller(self.options)
 
+        # Previous song, used by indicator code.
+        self.prev_song = self.player.current_position()
+
+        self.create_window()
+
+        # Settings for the play window.
+        setlist = ['buftype=nofile',
+                   'noswapfile',
+                   'nobuflisted',
+                   'nowrap' ]
+        for item in setlist:
+            vim.command('silent! setlocal %s' % item)
+
+        # Highlight the current playing song.
+        vim.command('syntax match XMMS2Current "^-.*"')
+        vim.command('hi link XMMS2Current Folded')
+
+        self.buf = vim.current.buffer
+        self.refresh_window()
+
     def _read_options(self):
         def exists(name):
             return vim.eval('exists("%s")' % name) == "1"
@@ -311,30 +353,17 @@ class XMMS2Vim(object):
         else:
             d["debug"] = False
 
+        if exists("g:xmms_playlist_format"):
+            d["playlist_format"] = vim.eval("g:xmms_playlist_format")
+        else:
+            d["playlist_format"] = "%artist - %title"
+
         return d
 
     def create_window(self):
-        # Previous song, used by indicator code.
-        self.prev_song = self.player.current_position()
-
         # Create a new window on the right.
         vim.command('silent! botright vertical %s split __XMMS2__'
                     % self.options["window_width"])
-        
-        # Settings for the play window.
-        setlist = ['buftype=nofile',
-                   'noswapfile',
-                   'nobuflisted',
-                   'nowrap' ]
-        for item in setlist:
-            vim.command('silent! setlocal %s' % item)
-
-        # Highlight the current playing song.
-        vim.command('syntax match XMMS2Current "^-.*"')
-        vim.command('hi link XMMS2Current Folded')
-
-        self.buf = vim.current.buffer
-        self.refresh_window()
 
     def _set_status(self, text):
         vim.command('silent! setlocal statusline=%s' % text)
@@ -476,6 +505,18 @@ class XMMS2Vim(object):
         self.player.pause()
 
 
+def xmms_refresh():
+    winnum = vim.eval('bufwinnr("__XMMS2__")')
+
+    if winnum != "-1":
+        prevwin = vim.eval("winnr()")
+        if prevwin == winnum:
+            xmms2vim.refresh_window()
+        else:
+            vim.command(winnum + "wincmd w")
+            xmms2vim.refresh_window()
+            vim.command(prevwin + 'wincmd w')
+
 def xmms_toggle():
     global xmms2vim
 
@@ -487,9 +528,9 @@ def xmms_toggle():
             xmms2vim.create_window()
         except NameError:
             xmms2vim = XMMS2Vim()
-            xmms2vim.create_window()
-        xmms_keymap()
-        vim.command('au WinEnter    __XMMS2__       py xmms2vim.refresh_mark()')
+            xmms_keymap()
+            vim.command('au WinEnter __XMMS2__ py xmms2vim.refresh_window()')
+            vim.command('au CursorHold * py xmms_refresh()')
     else:
         # If current window is __XMMS2__, we close it directly.
         # But when the cursor is in other window, we first remember
@@ -499,14 +540,14 @@ def xmms_toggle():
         if bufname != None and bufname.endswith('__XMMS2__'):
             # We close __XMMS__ only when there are other windows exists.
             if len(vim.windows) > 1:
-                vim.command('bdelete')
+                vim.command('close')
         else:
-            curbufnr = vim.eval('bufnr("%")')
+            prevbuf = vim.eval('bufnr("%")')
             vim.command(winnum + 'wincmd w')
-            vim.command('bdelete')
-            winnum = vim.eval('bufwinnr(%s)' % curbufnr)
-            if vim.eval('winnr()') != winnum:
-                vim.command(winnum + 'wincmd w')
+            vim.command('close')
+            prevwin = vim.eval('bufwinnr(%s)' % prevbuf)
+            if vim.eval('winnr()') != prevwin:
+                vim.command(prevwin + 'wincmd w')
 
 def xmms_keymap():
     """Key mappings."""
